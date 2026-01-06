@@ -65,7 +65,7 @@ class FeatureCompressor(
         for (id in identifierSet) {
             val bin = featureBins[id] ?: continue
             if (bin.size == 1) {
-                pointList[id] = bin.first().xyz
+//                pointList[id] = bin.first().xyz
             } else {
                 pointList[id] = getZScoreFilteredMeanPoint(bin, zScore)
             }
