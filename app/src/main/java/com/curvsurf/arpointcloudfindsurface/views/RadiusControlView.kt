@@ -13,6 +13,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
@@ -38,6 +39,7 @@ fun RadiusControlView(
     onRequireToSaveSeedRadius: () -> Unit
 ) {
 
+    val latestSeedRadiusRatio by rememberUpdatedState(radiusData.seedRadiusRatio)
     var baseRatio by remember { mutableFloatStateOf(radiusData.seedRadiusRatio) }
     var cumulativeScale by remember { mutableFloatStateOf(1f) }
     val transformState = rememberTransformableState { zoomChange, _, _ ->
@@ -50,7 +52,7 @@ fun RadiusControlView(
     LaunchedEffect(transformState) {
         snapshotFlow { transformState.isTransformInProgress }.collect { inProgress ->
             if (inProgress) {
-                baseRatio = radiusData.seedRadiusRatio
+                baseRatio = latestSeedRadiusRatio
                 cumulativeScale = 1f
             }
         }
