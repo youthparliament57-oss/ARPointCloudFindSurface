@@ -115,6 +115,7 @@ interface ContentViewModel {
     val effects: SharedFlow<UIEffect>
     val toasts: SharedFlow<String>
 
+    fun skipStabilization()
     fun captureGeometry()
     fun undo()
     fun clearGeometries()
@@ -167,6 +168,7 @@ class PreviewViewModel(stabilized: Boolean): ContentViewModel {
     private val _toasts = MutableSharedFlow<String>()
     override val toasts = _toasts.asSharedFlow()
 
+    override fun skipStabilization() {}
     override fun captureGeometry() {}
     override fun undo() {}
     override fun clearGeometries() {}
@@ -219,7 +221,9 @@ fun ContentView(
 
             val stabilizationData by viewModel.stabilizationData.collectAsStateWithLifecycle()
 
-            MotionTrackingStabilizationView(stabilizationData,
+            MotionTrackingStabilizationView(
+                stabilizationData = stabilizationData,
+                onSkip = { viewModel.skipStabilization() },
                 modifier = Modifier.align(Alignment.Center)
             )
 

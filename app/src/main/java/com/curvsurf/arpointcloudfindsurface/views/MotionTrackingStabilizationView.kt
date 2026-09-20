@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -38,12 +39,14 @@ import kotlin.math.sin
 @Composable
 fun MotionTrackingStabilizationView(
     stabilizationData: StabilizationData,
-    modifier: Modifier
+    onSkip: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
 ) {
     Box(modifier = modifier.fillMaxSize()) {
         if (stabilizationData.status != MotionTrackingStabilizer.Status.Finished) {
             if (stabilizationData.notEnoughFeatures) {
                 AskUserToScanMoreTexturedEnvironmentView(
+                    onSkip = onSkip,
                     modifier = Modifier
                         .align(Alignment.Center)
                         .padding(16.dp)
@@ -51,6 +54,7 @@ fun MotionTrackingStabilizationView(
             } else {
                 AskUserToScanEnvironmentView(
                     progress = stabilizationData.progress,
+                    onSkip = onSkip,
                     modifier = Modifier
                         .align(Alignment.Center)
                         .padding(16.dp)
@@ -62,6 +66,7 @@ fun MotionTrackingStabilizationView(
 
 @Composable
 private fun AskUserToScanMoreTexturedEnvironmentView(
+    onSkip: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -69,21 +74,28 @@ private fun AskUserToScanMoreTexturedEnvironmentView(
         modifier = modifier.widthIn(max = 320.dp)
     ) {
         Column(
-            modifier = modifier.padding(16.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Using same smartphone icon as a generic indicator
             Icon(
                 painter = painterResource(id = R.drawable.chat_info_24px),
                 contentDescription = null,
-                modifier = modifier.size(56.dp)
+                modifier = Modifier.size(56.dp)
             )
             Text(
                 text = "Keep moving your device and aim at surfaces that are textured or have details on them.",
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center
             )
+            if (onSkip != null) {
+                FilledTonalButton(
+                    onClick = onSkip,
+                    modifier = Modifier.padding(top = 4.dp)
+                ) {
+                    Text("Skip & Start Scanning")
+                }
+            }
         }
     }
 }
@@ -91,6 +103,7 @@ private fun AskUserToScanMoreTexturedEnvironmentView(
 @Composable
 private fun AskUserToScanEnvironmentView(
     progress: Float,
+    onSkip: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val infinite = rememberInfiniteTransition(label = "tilt")
@@ -146,6 +159,14 @@ private fun AskUserToScanEnvironmentView(
                     .widthIn(min = 200.dp)
                     .height(6.dp)
             )
+            if (onSkip != null) {
+                FilledTonalButton(
+                    onClick = onSkip,
+                    modifier = Modifier.padding(top = 4.dp)
+                ) {
+                    Text("Skip & Start Scanning")
+                }
+            }
         }
     }
 }

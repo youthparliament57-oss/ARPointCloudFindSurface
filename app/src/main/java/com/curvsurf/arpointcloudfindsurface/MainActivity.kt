@@ -195,6 +195,13 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
             return
         }
 
+        if (viewModel.stabilizationData.value.status.isFinished) {
+            motionTrackingStabilizer.finish()
+            recording = true
+            previewEnabled = true
+            return
+        }
+
         val oldStatus = motionTrackingStabilizer.status
         val newStatus = motionTrackingStabilizer.update(cameraPose, featureCount)
         viewModel.updateStabilizationData(motionTrackingStabilizer)

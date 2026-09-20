@@ -64,6 +64,16 @@ class AppViewModel(
         )
     }
 
+    override fun skipStabilization() {
+        updateStabilizationData(
+            status = MotionTrackingStabilizer.Status.Finished,
+            notEnoughFeatures = false,
+            progress = 1.0f
+        )
+        updateRecordingData(recording = true)
+        updateFindSurfaceData(previewEnabled = true)
+    }
+
     private val _recordingData = MutableStateFlow(
         RecordingData()
     )
