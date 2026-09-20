@@ -1,0 +1,6 @@
+{
+  "name": "ARPointCloudFindSurface",
+  "description": "AR Core Point Cloud visualization and 3D surface geometry detection app",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
