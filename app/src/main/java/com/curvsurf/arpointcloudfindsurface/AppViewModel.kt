@@ -119,14 +119,22 @@ class AppViewModel(
         featureType: FeatureType?,
         previewEnabled: Boolean?,
         hasToSaveOne: Boolean?,
-        transactionIsEmpty: Boolean?
+        transactionIsEmpty: Boolean?,
+        currentDepth: Float?,
+        isSurfaceDetected: Boolean?,
+        rmsErrorCm: Float?,
+        inlierCount: Int?
     ) {
         _findSurfaceData.update { s ->
             s.copy(
                 featureType = featureType ?: s.featureType,
                 previewEnabled = previewEnabled ?: s.previewEnabled,
                 hasToSaveOne = hasToSaveOne ?: s.hasToSaveOne,
-                transactionIsEmpty = transactionIsEmpty ?: s.transactionIsEmpty
+                transactionIsEmpty = transactionIsEmpty ?: s.transactionIsEmpty,
+                currentDepth = currentDepth ?: s.currentDepth,
+                isSurfaceDetected = isSurfaceDetected ?: s.isSurfaceDetected,
+                rmsErrorCm = rmsErrorCm ?: s.rmsErrorCm,
+                inlierCount = inlierCount ?: s.inlierCount
             )
         }
     }

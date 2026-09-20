@@ -3,12 +3,17 @@ package com.curvsurf.arpointcloudfindsurface
 import android.content.res.Configuration
 import android.opengl.GLSurfaceView
 import android.widget.Toast
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.SnackbarHost
@@ -20,15 +25,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Devices
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.curvsurf.arpointcloudfindsurface.helpers.ARCoreAppGLRenderer
 import com.curvsurf.arpointcloudfindsurface.helpers.MotionTrackingStabilizer
@@ -68,7 +76,11 @@ data class FindSurfaceData(
     val featureType: FeatureType = FeatureType.Plane,
     val previewEnabled: Boolean = false,
     val hasToSaveOne: Boolean = false,
-    val transactionIsEmpty: Boolean = true
+    val transactionIsEmpty: Boolean = true,
+    val currentDepth: Float = -1f,
+    val isSurfaceDetected: Boolean = false,
+    val rmsErrorCm: Float = 0f,
+    val inlierCount: Int = 0
 )
 
 data class RadiusData(
@@ -109,7 +121,11 @@ interface ContentViewModel {
         featureType: FeatureType? = null,
         previewEnabled: Boolean? = null,
         hasToSaveOne: Boolean? = null,
-        transactionIsEmpty: Boolean? = null
+        transactionIsEmpty: Boolean? = null,
+        currentDepth: Float? = null,
+        isSurfaceDetected: Boolean? = null,
+        rmsErrorCm: Float? = null,
+        inlierCount: Int? = null
     )
 
     val effects: SharedFlow<UIEffect>
@@ -160,7 +176,11 @@ class PreviewViewModel(stabilized: Boolean): ContentViewModel {
         featureType: FeatureType?,
         previewEnabled: Boolean?,
         hasToSaveOne: Boolean?,
-        transactionIsEmpty: Boolean?
+        transactionIsEmpty: Boolean?,
+        currentDepth: Float?,
+        isSurfaceDetected: Boolean?,
+        rmsErrorCm: Float?,
+        inlierCount: Int?
     ) {}
 
     private val _effects = MutableSharedFlow<UIEffect>()
@@ -243,7 +263,9 @@ fun ContentView(
 
                 StatusView(
                     modifier = Modifier.align(Alignment.TopStart),
-                    pointCount = recordingData.pointCount
+                    pointCount = recordingData.pointCount,
+                    findSurfaceData = findSurfaceData,
+                    recording = recordingData.recording
                 )
 
                 val density = LocalDensity.current
@@ -395,20 +417,118 @@ fun ContentViewPreview_Phone_Stabilized() {
 @Composable
 private fun StatusView(
     modifier: Modifier,
-    pointCount: Int) {
-    val pointCount = String.format(Locale.US, "%6d", pointCount)
+    pointCount: Int,
+    findSurfaceData: FindSurfaceData,
+    recording: Boolean
+) {
     Card(
         modifier = modifier.padding(top = 16.dp, start = 16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = Color.DarkGray.copy(alpha = 0.5f)
-        )
+            containerColor = Color.Black.copy(alpha = 0.65f)
+        ),
+        shape = RoundedCornerShape(12.dp)
     ) {
-        Text(
-            "Points: $pointCount pts.",
-            textAlign = TextAlign.Start,
-            color = Color.White,
-            modifier = Modifier.padding(8.dp)
-        )
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            // Row 1: Points & Live Depth
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Points pill
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(if (recording) Color(0xFF4CAF50) else Color(0xFFFF9800))
+                    )
+                    Text(
+                        text = "$pointCount pts",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = Color.White
+                    )
+                }
+
+                // Depth Meter
+                val depthText = if (findSurfaceData.currentDepth > 0f) {
+                    String.format(Locale.US, "%.2f m", findSurfaceData.currentDepth)
+                } else {
+                    "--"
+                }
+                val (depthColor, depthHint) = when {
+                    findSurfaceData.currentDepth <= 0f -> Color.LightGray to ""
+                    findSurfaceData.currentDepth < 0.35f -> Color(0xFFFFB74D) to " (Close)"
+                    findSurfaceData.currentDepth <= 2.2f -> Color(0xFF81C784) to " (Optimal)"
+                    else -> Color(0xFF90CAF9) to " (Far)"
+                }
+                Text(
+                    text = "Depth: $depthText$depthHint",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = depthColor
+                )
+            }
+
+            // Row 2: Surface Detection Status & Accuracy
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val featureName = findSurfaceData.featureType.name
+                if (findSurfaceData.isSurfaceDetected) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color(0xFF2E7D32).copy(alpha = 0.75f))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "✓ $featureName Locked",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFC8E6C9)
+                        )
+                    }
+                    Text(
+                        text = "RMS: ${String.format(Locale.US, "%.1f", findSurfaceData.rmsErrorCm)} cm",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = Color(0xFFE0E0E0)
+                    )
+                    Text(
+                        text = "(${findSurfaceData.inlierCount} inliers)",
+                        fontSize = 11.sp,
+                        color = Color(0xFFB0BEC5)
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color(0xFFEF6C00).copy(alpha = 0.65f))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "Aligning $featureName...",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color(0xFFFFE082)
+                        )
+                    }
+                    Text(
+                        text = "Aim reticle at surface",
+                        fontSize = 11.sp,
+                        color = Color(0xFFB0BEC5)
+                    )
+                }
+            }
+        }
     }
 }
 

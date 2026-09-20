@@ -28,6 +28,8 @@ import com.curvsurf.arpointcloudfindsurface.helpers.arcore.ARFrameProvider
 import com.curvsurf.arpointcloudfindsurface.helpers.arcore.ARFrameProviderException
 import com.curvsurf.arpointcloudfindsurface.helpers.arcore.CameraPermissionHelper
 import com.curvsurf.arpointcloudfindsurface.helpers.curvsurf.GeometryObject
+import com.curvsurf.arpointcloudfindsurface.helpers.math.distance
+import com.curvsurf.arpointcloudfindsurface.helpers.math.distance2
 import com.curvsurf.arpointcloudfindsurface.helpers.math.dot
 import com.curvsurf.arpointcloudfindsurface.helpers.math.invoke
 import com.curvsurf.arpointcloudfindsurface.helpers.math.length2
@@ -37,6 +39,7 @@ import com.curvsurf.arpointcloudfindsurface.helpers.math.xyz
 import com.curvsurf.arpointcloudfindsurface.helpers.putVector3
 import com.curvsurf.findsurface.FeatureType
 import com.curvsurf.findsurface.FindSurface
+import com.curvsurf.findsurface.SearchLevel
 import com.google.ar.core.Camera
 import com.google.ar.core.Frame
 import com.google.ar.core.Pose
@@ -50,6 +53,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHolder {
 
@@ -72,8 +77,10 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
         super.onCreate(savedInstanceState)
         frameProvider = ARFrameProvider(this)
 
-        FindSurface.measurementAccuracy = 0.10f
-        FindSurface.meanDistance = 0.50f
+        FindSurface.measurementAccuracy = 0.02f
+        FindSurface.meanDistance = 0.04f
+        FindSurface.radialExpansion = SearchLevel.Lv5
+        FindSurface.lateralExtension = SearchLevel.Lv7
         FindSurface.setDebugCallback(FindSurface.Severity.Info, null) { errorCode, severity, api, cause, string, any ->
             val message = "$errorCode, $api, $cause, $string"
             when (severity) {
@@ -168,11 +175,16 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
         }
     }
 
+    private var viewportWidth: Int = 0
+    private var viewportHeight: Int = 0
+
     override fun onSurfaceCreated() {
         renderer.onInit()
     }
 
     override fun onSurfaceChanged(width: Int, height: Int) {
+        viewportWidth = width
+        viewportHeight = height
         frameProvider.onSurfaceChanged(width, height)
         renderer.onResize(width, height)
     }
@@ -320,9 +332,32 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
     private var lastFound: FindSurface.Result? = null
     private var transactions: MutableList<Transaction> = mutableListOf()
 
-    private fun pickPoint(points: Array<Vector3>, camera: Camera): Pair<Int, Float>? {
+    private fun pickPoint(
+        points: Array<Vector3>,
+        camera: Camera,
+        hitDistance: Float?,
+        hitPosition: Vector3?
+    ): Pair<Int, Float>? {
         if (points.isEmpty()) return null
 
+        // 1. First priority: Direct AR surface hit from frame hitTest
+        if (hitPosition != null && hitDistance != null && hitDistance in 0.15f..8.0f) {
+            var closestIdx = -1
+            var minD2 = Float.MAX_VALUE
+            for (i in points.indices) {
+                val d2 = distance2(points[i], hitPosition)
+                if (d2 < minD2) {
+                    minD2 = d2
+                    closestIdx = i
+                }
+            }
+            // If closest point cloud point is within 25cm of AR hit:
+            if (closestIdx >= 0 && minD2 <= 0.0625f) {
+                return closestIdx to hitDistance
+            }
+        }
+
+        // 2. Optical ray-casting along camera line of sight
         val cameraPosition = Vector3(camera.pose.translation)
         val cameraDirection = -normalize(Vector3(camera.pose.zAxis))
         val tanHalfFov = camera.imageIntrinsics.let { intrinsics ->
@@ -331,21 +366,33 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
             0.5f * heightPx / fy
         }
         val probeRadiusRatio = viewModel.radiusData.value.probeRadiusRatio
-        val probeRadiusSlope = tanHalfFov * probeRadiusRatio
+        val probeRadiusSlope = if (probeRadiusRatio > 0.01f) {
+            tanHalfFov * probeRadiusRatio
+        } else {
+            tanHalfFov * 0.12f // standard reticle probe cone (~12% screen radius)
+        }
 
         var minIndex = -1
         var minRadialRatio = Float.POSITIVE_INFINITY
         var chosenDepth = Float.POSITIVE_INFINITY
-        points.forEachIndexed { index, point ->
+
+        // Secondary fallback cone (~18 degrees) to prevent flickering if points inside reticle are sparse
+        var fallbackIndex = -1
+        var fallbackMinAngleRatio = Float.POSITIVE_INFINITY
+        var fallbackDepth = Float.POSITIVE_INFINITY
+
+        for (index in points.indices) {
+            val point = points[index]
             val PO = point - cameraPosition
             val t = dot(PO, cameraDirection)
-            if (t <= 0f) return@forEachIndexed
-
-            val probeRadius = t * probeRadiusSlope
-            val probeRadiusSquared = probeRadius * probeRadius
+            if (t <= 0.1f) continue
 
             val PO2 = dot(PO, PO)
             val r2 = PO2 - t * t
+            if (r2 < 0f) continue
+
+            val probeRadius = t * probeRadiusSlope
+            val probeRadiusSquared = probeRadius * probeRadius
 
             if (r2 <= probeRadiusSquared) {
                 val radialRatio = r2 / probeRadiusSquared
@@ -354,10 +401,68 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
                     minRadialRatio = radialRatio
                     chosenDepth = t
                 }
+            } else {
+                val angleRatio = r2 / (t * t)
+                if (angleRatio <= 0.10f && angleRatio < fallbackMinAngleRatio) {
+                    fallbackIndex = index
+                    fallbackMinAngleRatio = angleRatio
+                    fallbackDepth = t
+                }
             }
         }
 
-        return if (minIndex >= 0) minIndex to chosenDepth else null
+        return when {
+            minIndex >= 0 -> minIndex to chosenDepth
+            fallbackIndex >= 0 -> fallbackIndex to fallbackDepth
+            hitDistance != null && hitDistance in 0.15f..8.0f -> {
+                // Return closest point cloud point along camera distance
+                var bestIdx = -1
+                var minDiff = Float.MAX_VALUE
+                for (i in points.indices) {
+                    val d = distance(points[i], cameraPosition)
+                    val diff = abs(d - hitDistance)
+                    if (diff < minDiff && diff < 0.45f) {
+                        minDiff = diff
+                        bestIdx = i
+                    }
+                }
+                if (bestIdx >= 0) bestIdx to hitDistance else null
+            }
+            else -> null
+        }
+    }
+
+    private fun calculateLocalMeanDistance(
+        seedIndex: Int,
+        points: Array<Vector3>,
+        seedRadius: Float,
+        depth: Float
+    ): Float {
+        if (seedIndex in points.indices) {
+            val seedPoint = points[seedIndex]
+            val radiusSq = seedRadius * seedRadius
+            val neighborDistances = mutableListOf<Float>()
+
+            for (i in points.indices) {
+                if (i == seedIndex) continue
+                val d2 = distance2(points[i], seedPoint)
+                if (d2 in 0.0001f..radiusSq) {
+                    neighborDistances.add(sqrt(d2))
+                }
+            }
+
+            if (neighborDistances.size >= 3) {
+                neighborDistances.sort()
+                val sampleCount = minOf(neighborDistances.size, 8)
+                var sum = 0f
+                for (k in 0 until sampleCount) {
+                    sum += neighborDistances[k]
+                }
+                val avgDist = sum / sampleCount
+                return (avgDist * 2.5f).coerceIn(0.02f, 0.08f)
+            }
+        }
+        return (0.022f + 0.012f * depth).coerceIn(0.025f, 0.07f)
     }
 
     private fun addTransaction(transaction: Transaction) {
@@ -369,40 +474,98 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
     }
 
     private val mutex = Mutex()
-    private fun detectGeometries(camera: Camera) {
+    private fun detectGeometries(frame: Frame, camera: Camera) {
         val pointCloud = pointCloud ?: return
-        val pickingResult = pickPoint(pointCloud, camera)
+
+        // Raycast / HitTest at screen center to get physical depth ground truth
+        var hitDistance: Float? = null
+        var hitPosition: Vector3? = null
+        if (viewportWidth > 0 && viewportHeight > 0) {
+            try {
+                val hits = frame.hitTest(viewportWidth * 0.5f, viewportHeight * 0.5f)
+                for (hit in hits) {
+                    val dist = hit.distance
+                    if (dist in 0.15f..10.0f) {
+                        hitDistance = dist
+                        hitPosition = Vector3(hit.hitPose.translation)
+                        break
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "hitTest failed: ${e.message}")
+            }
+        }
+
+        val pickingResult = pickPoint(pointCloud, camera, hitDistance, hitPosition)
         renderer.updatePickedIndex(pickingResult?.first ?: -1)
+
+        val activeDepth = pickingResult?.second ?: hitDistance ?: -1f
 
         if (!previewEnabled && !hasToSaveOne) {
             renderer.setPreviewNone()
+            viewModel.updateFindSurfaceData(
+                currentDepth = activeDepth,
+                isSurfaceDetected = false,
+                rmsErrorCm = 0f,
+                inlierCount = 0
+            )
             return
         }
         val hasToSaveOne = this.hasToSaveOne
         if (this.hasToSaveOne) { this.hasToSaveOne = false }
 
-        val (pickedIndex, pickedDepth) = pickingResult ?: return
+        if (pickingResult == null) {
+            renderer.setPreviewNone()
+            viewModel.updateFindSurfaceData(
+                currentDepth = activeDepth,
+                isSurfaceDetected = false,
+                rmsErrorCm = 0f,
+                inlierCount = 0
+            )
+            return
+        }
+
+        val (pickedIndex, pickedDepth) = pickingResult
         val tanHalfFov = camera.imageIntrinsics.let { intrinsics ->
             val heightPx = intrinsics.imageDimensions[1].toFloat()
             val fy = intrinsics.focalLength[1]
             0.5f * heightPx / fy
         }
-        val seedRadius = tanHalfFov * viewModel.radiusData.value.seedRadiusRatio * pickedDepth
         val featureType = viewModel.findSurfaceData.value.featureType
+        val rawSeedRadius = tanHalfFov * viewModel.radiusData.value.seedRadiusRatio * pickedDepth
+        val seedRadius = when (featureType) {
+            FeatureType.Cylinder -> rawSeedRadius.coerceIn(0.04f, 0.22f)
+            FeatureType.Sphere -> rawSeedRadius.coerceIn(0.04f, 0.28f)
+            else -> rawSeedRadius.coerceIn(0.08f, 0.65f)
+        }
+
         val currentPointCloud = pointCloud
         if (!mutex.tryLock()) return
         lifecycleScope.launch {
             try {
                 val (result, inliers) = withContext(Dispatchers.Default) {
-                    FindSurface.meanDistance = pickedDepth.coerceIn(0.1f, 10.0f)
+                    val localMeanDist = calculateLocalMeanDistance(pickedIndex, currentPointCloud, seedRadius, pickedDepth)
+                    val nominalAccuracy = (0.012f + 0.008f * pickedDepth).coerceIn(0.012f, 0.030f)
+
+                    FindSurface.measurementAccuracy = nominalAccuracy
+                    FindSurface.meanDistance = localMeanDist
                     FindSurface.seedRadius = seedRadius
+                    FindSurface.radialExpansion = SearchLevel.Lv5
+                    FindSurface.lateralExtension = SearchLevel.Lv7
                     FindSurface.setPointCloud(pointBuffer, 0, currentPointCloud.size)
                     pointBuffer.rewind()
                     FindSurface.seedIndex = pickedIndex
 
                     var computedResult = FindSurface.findSurface(featureType)
-                    val lastFoundObj = this@MainActivity.lastFound
 
+                    // Adaptive relaxation pass if initial pass had slight noise
+                    if (computedResult.featureType == FeatureType.None) {
+                        FindSurface.measurementAccuracy = (nominalAccuracy * 1.6f).coerceAtMost(0.045f)
+                        FindSurface.meanDistance = (localMeanDist * 1.3f).coerceAtMost(0.085f)
+                        computedResult = FindSurface.findSurface(featureType)
+                    }
+
+                    val lastFoundObj = this@MainActivity.lastFound
                     if (computedResult.featureType == FeatureType.None && hasToSaveOne && lastFoundObj != null) {
                         computedResult = lastFoundObj
                     }
@@ -425,6 +588,22 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
                     } else emptyArray()
 
                     computedResult to computedInliers
+                }
+
+                if (result.featureType != FeatureType.None) {
+                    viewModel.updateFindSurfaceData(
+                        currentDepth = pickedDepth,
+                        isSurfaceDetected = true,
+                        rmsErrorCm = result.rmsError * 100f,
+                        inlierCount = inliers.size
+                    )
+                } else {
+                    viewModel.updateFindSurfaceData(
+                        currentDepth = pickedDepth,
+                        isSurfaceDetected = false,
+                        rmsErrorCm = 0f,
+                        inlierCount = 0
+                    )
                 }
 
                 when (result.featureType) {
@@ -529,7 +708,7 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
         stabilizeMotionTracking(cameraPose, featureCount)
 
         collectPoints(features, identifiers, viewMatrix, cameraPose)
-        detectGeometries(camera)
+        detectGeometries(frame, camera)
 
         renderer.onDrawFrame(frame)
     }
