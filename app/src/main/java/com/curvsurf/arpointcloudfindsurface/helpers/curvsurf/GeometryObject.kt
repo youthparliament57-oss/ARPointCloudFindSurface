@@ -86,7 +86,7 @@ sealed class GeometryObject(
 
             val len2 = length2(upwardDirection)
             if (len2 == 0f) return align(cameraPosition)
-            val up = upwardDirection / len2
+            val up = normalize(upwardDirection)
 
             var x = this.xAxis
             val y = this.yAxis

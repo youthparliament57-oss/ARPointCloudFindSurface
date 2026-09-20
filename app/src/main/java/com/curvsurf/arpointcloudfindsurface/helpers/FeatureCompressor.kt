@@ -10,7 +10,7 @@ class FeatureCompressor(
     private val maxIdentifierCount: Int,
     private val maxPointBinSize: Int
 ) {
-    var zScore: Float = 1.0f
+    var zScore: Float = 2.0f
 
     private val identifierSet: MutableSet<Int> = mutableSetOf()
     private val identifierList: IntArrayFIFOQueue = IntArrayFIFOQueue()
@@ -74,9 +74,10 @@ class FeatureCompressor(
 }
 
 private fun getZScoreFilteredMeanPointWithoutWeights(features: ArrayDeque<Vector4>, zScore: Float): Vector3 {
-    val meanPoint = features.reduce { acc, feature ->
-        acc + feature
-    }.xyz / features.size.toFloat()
+    if (features.isEmpty()) return Vector3()
+    val meanPoint = features.fold(Vector3()) { acc, feature ->
+        acc + feature.xyz
+    } / features.size.toFloat()
 
     val distanceSquared = features.map { feature ->
         distance2(feature.xyz, meanPoint)
@@ -93,7 +94,7 @@ private fun getZScoreFilteredMeanPointWithoutWeights(features: ArrayDeque<Vector
         count++
     }
 
-    return newMeanPoint / count.toFloat()
+    return if (count > 0) newMeanPoint / count.toFloat() else meanPoint
 }
 
 private fun getZScoreFilteredMeanPoint(features: ArrayDeque<Vector4>, zScore: Float): Vector3 {
@@ -103,23 +104,31 @@ private fun getZScoreFilteredMeanPoint(features: ArrayDeque<Vector4>, zScore: Fl
         weightedMeanPoint += feature.xyz * feature.w
         totalWeight += feature.w
     }
+    if (totalWeight <= 0f) return features.last().xyz
     weightedMeanPoint /= totalWeight
 
-    val weightedSquaredDistances = features.map { feature ->
-        distance2(feature.xyz, weightedMeanPoint) * feature.w
+    val squaredDistances = features.map { feature ->
+        distance2(feature.xyz, weightedMeanPoint)
     }
 
-    val variance = weightedSquaredDistances.sum() / totalWeight
-    val threshold = zScore * zScore * variance
+    val weightedVariance = features.indices.sumOf { i ->
+        (squaredDistances[i] * features[i].w).toDouble()
+    }.toFloat() / totalWeight
+
+    val threshold = zScore * zScore * weightedVariance
 
     var filteredTotalWeight = 0f
     var filteredWeightedMeanPoint = Vector3()
     for (i in 0 until features.size) {
-        if (weightedSquaredDistances[i] > threshold) continue
+        if (squaredDistances[i] > threshold) continue
         val feature = features[i]
         filteredWeightedMeanPoint += feature.xyz * feature.w
         filteredTotalWeight += feature.w
     }
 
-    return filteredWeightedMeanPoint / filteredTotalWeight
+    return if (filteredTotalWeight > 0f) {
+        filteredWeightedMeanPoint / filteredTotalWeight
+    } else {
+        weightedMeanPoint
+    }
 }

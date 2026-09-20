@@ -41,9 +41,11 @@ import com.google.ar.core.Camera
 import com.google.ar.core.Frame
 import com.google.ar.core.Pose
 import com.google.ar.core.exceptions.CameraNotAvailableException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -240,15 +242,23 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
             }
         }
 
-        val features = if (validIndices.isEmpty()) features else {
-            features.filterIndexed { index, _ -> index in validIndices }.toTypedArray()
+        // Edge case fix: If no points pass the near-plane filter, return early instead of passing all noise
+        if (validIndices.isEmpty()) return
+
+        val validCount = validIndices.size
+        val filteredFeatures = if (validCount == features.size) {
+            features
+        } else {
+            Array(validCount) { idx -> features[validIndices[idx]] }
         }
 
-        val identifiers = if (validIndices.isEmpty()) identifiers else {
-            identifiers.filterIndexed { index, _ -> index in validIndices }.toIntArray()
+        val filteredIdentifiers = if (validCount == identifiers.size) {
+            identifiers
+        } else {
+            IntArray(validCount) { idx -> identifiers[validIndices[idx]] }
         }
 
-        featureCompressor.append(features, identifiers)
+        featureCompressor.append(filteredFeatures, filteredIdentifiers)
 
         if (featureCompressor.updated) {
             val compressed = featureCompressor.points
@@ -273,25 +283,22 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
         val featureBuffer = pointcloud.points
         renderer.setRawFeaturePoints(featureBuffer)
 
-        val features = featureBuffer.let { buffer ->
-            buffer.rewind()
-            val floatCount = buffer.remaining()
-            val floatArray = FloatArray(floatCount)
-            buffer.get(floatArray, 0, floatCount)
+        featureBuffer.rewind()
+        val floatCount = featureBuffer.remaining()
+        val floatArray = FloatArray(floatCount)
+        featureBuffer.get(floatArray, 0, floatCount)
 
-            val pointCount = floatCount / 4
-            (0 until pointCount).map {
-                Vector4(array = floatArray, offset = it * 4)
-            }.toTypedArray()
+        val pointCount = floatCount / 4
+        val features = Array(pointCount) { i ->
+            Vector4(array = floatArray, offset = i * 4)
         }
 
-        val identifiers = pointcloud.ids.let { buffer ->
-            buffer.rewind()
-            val identifierCount = buffer.remaining()
-            val identifierArray = IntArray(identifierCount)
-            buffer.get(identifierArray, 0, identifierCount)
-            identifierArray
-        }
+        val idBuffer = pointcloud.ids
+        idBuffer.rewind()
+        val identifierCount = idBuffer.remaining()
+        val identifiers = IntArray(identifierCount)
+        idBuffer.get(identifiers, 0, identifierCount)
+
         pointcloud.release()
         return features to identifiers
     }
@@ -320,8 +327,8 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
         val probeRadiusSlope = tanHalfFov * probeRadiusRatio
 
         var minIndex = -1
-        var minDistanceSquared = Float.POSITIVE_INFINITY
-        var minDepth = Float.POSITIVE_INFINITY
+        var minRadialRatio = Float.POSITIVE_INFINITY
+        var chosenDepth = Float.POSITIVE_INFINITY
         points.forEachIndexed { index, point ->
             val PO = point - cameraPosition
             val t = dot(PO, cameraDirection)
@@ -333,14 +340,17 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
             val PO2 = dot(PO, PO)
             val r2 = PO2 - t * t
 
-            if (r2 <= probeRadiusSquared && PO2 < minDistanceSquared) {
-                minIndex = index
-                minDistanceSquared = PO2
-                minDepth = t
+            if (r2 <= probeRadiusSquared) {
+                val radialRatio = r2 / probeRadiusSquared
+                if (radialRatio < minRadialRatio) {
+                    minIndex = index
+                    minRadialRatio = radialRatio
+                    chosenDepth = t
+                }
             }
         }
 
-        return if (minIndex >= 0) minIndex to minDepth else null
+        return if (minIndex >= 0) minIndex to chosenDepth else null
     }
 
     private fun addTransaction(transaction: Transaction) {
@@ -371,73 +381,100 @@ class MainActivity : ComponentActivity(), ARCoreAppGLRenderer, GLSurfaceViewHold
             0.5f * heightPx / fy
         }
         val seedRadius = tanHalfFov * viewModel.radiusData.value.seedRadiusRatio * pickedDepth
+        val featureType = viewModel.findSurfaceData.value.featureType
+        val currentPointCloud = pointCloud
         if (!mutex.tryLock()) return
         lifecycleScope.launch {
-            FindSurface.seedRadius = seedRadius
-            FindSurface.setPointCloud(pointBuffer, 0, pointCloud.size)
-            pointBuffer.rewind()
-            FindSurface.seedIndex = pickedIndex
+            try {
+                val (result, inliers) = withContext(Dispatchers.Default) {
+                    FindSurface.meanDistance = pickedDepth.coerceIn(0.1f, 10.0f)
+                    FindSurface.seedRadius = seedRadius
+                    FindSurface.setPointCloud(pointBuffer, 0, currentPointCloud.size)
+                    pointBuffer.rewind()
+                    FindSurface.seedIndex = pickedIndex
 
-            var result = FindSurface.findSurface(viewModel.findSurfaceData.value.featureType)
-            val lastFound = lastFound
+                    var computedResult = FindSurface.findSurface(featureType)
+                    val lastFoundObj = this@MainActivity.lastFound
 
-            if (result.featureType == FeatureType.None && hasToSaveOne && lastFound != null) {
-                result = lastFound
+                    if (computedResult.featureType == FeatureType.None && hasToSaveOne && lastFoundObj != null) {
+                        computedResult = lastFoundObj
+                    }
+
+                    val computedInliers: Array<Vector3> = if (computedResult.featureType != FeatureType.None) {
+                        val flags = FindSurface.getInlierFlags()
+                        val minLen = minOf(flags.size, currentPointCloud.size)
+                        var inlierCount = 0
+                        for (i in 0 until minLen) {
+                            if (flags[i]) inlierCount++
+                        }
+                        val resultArr = Array(inlierCount) { Vector3() }
+                        var writeIdx = 0
+                        for (i in 0 until minLen) {
+                            if (flags[i]) {
+                                resultArr[writeIdx++] = currentPointCloud[i]
+                            }
+                        }
+                        resultArr
+                    } else emptyArray()
+
+                    computedResult to computedInliers
+                }
+
+                when (result.featureType) {
+                    FeatureType.Plane -> {
+                        val plane = GeometryObject.Plane.from(result)
+                        if (plane != null) {
+                            if (hasToSaveOne) {
+                                showToast("Captured plane!\n(rms error: %.1f cm)", result.rmsError * 100f)
+                                glSurfaceView?.queueEvent { renderer.appendPlane(plane, inliers) }
+                                addTransaction(Transaction.AddPlane)
+                                this@MainActivity.lastFound = null
+                            } else {
+                                glSurfaceView?.queueEvent { renderer.updatePreview(plane) }
+                            }
+                        }
+                    }
+
+                    FeatureType.Sphere -> {
+                        val sphere = GeometryObject.Sphere.from(result)
+                        if (sphere != null) {
+                            if (hasToSaveOne) {
+                                showToast("Captured sphere!\n(rms error: %.1f cm)", result.rmsError * 100f)
+                                glSurfaceView?.queueEvent { renderer.appendSphere(sphere, inliers) }
+                                addTransaction(Transaction.AddSphere)
+                                this@MainActivity.lastFound = null
+                            } else {
+                                glSurfaceView?.queueEvent { renderer.updatePreview(sphere) }
+                            }
+                        }
+                    }
+
+                    FeatureType.Cylinder -> {
+                        val cylinder = GeometryObject.Cylinder.from(result)
+                        if (cylinder != null) {
+                            if (hasToSaveOne) {
+                                showToast("Captured cylinder!\n(rms error: %.1f cm)", result.rmsError * 100f)
+                                glSurfaceView?.queueEvent { renderer.appendCylinder(cylinder, inliers) }
+                                addTransaction(Transaction.AddCylinder)
+                                this@MainActivity.lastFound = null
+                            } else {
+                                glSurfaceView?.queueEvent { renderer.updatePreview(cylinder) }
+                            }
+                        }
+                    }
+
+                    else -> {
+                        if (hasToSaveOne) {
+                            showToast("Nothing captured, try again.\n(rms error: %.1f cm)", result.rmsError * 100f)
+                        } else {
+                            glSurfaceView?.queueEvent { renderer.setPreviewNone() }
+                        }
+                        this@MainActivity.lastFound = null
+                    }
+                }
+            } finally {
+                mutex.unlock()
             }
-            val inliers: Array<Vector3> = if (result.featureType != FeatureType.None) {
-                FindSurface.getInlierFlags()
-                    .zip(pointCloud)
-                    .filter { it.first }
-                    .map { it.second }.toTypedArray()
-            } else emptyArray()
-
-            when (result.featureType) {
-                FeatureType.Plane -> {
-                    val plane = GeometryObject.Plane.from(result)!!
-                    if (hasToSaveOne) {
-                        showToast("Captured plane!\n(rms error: %.1f cm)", result.rmsError * 100f)
-                        glSurfaceView?.queueEvent { renderer.appendPlane(plane, inliers) }
-                        addTransaction(Transaction.AddPlane)
-                        this@MainActivity.lastFound = null
-                    } else {
-                        glSurfaceView?.queueEvent { renderer.updatePreview(plane) }
-                    }
-                }
-
-                FeatureType.Sphere -> {
-                    val sphere = GeometryObject.Sphere.from(result)!!
-                    if (hasToSaveOne) {
-                        showToast("Captured sphere!\n(rms error: %.1f cm)", result.rmsError * 100f)
-                        glSurfaceView?.queueEvent { renderer.appendSphere(sphere, inliers) }
-                        addTransaction(Transaction.AddSphere)
-                        this@MainActivity.lastFound = null
-                    } else {
-                        glSurfaceView?.queueEvent { renderer.updatePreview(sphere) }
-                    }
-                }
-
-                FeatureType.Cylinder -> {
-                    val cylinder = GeometryObject.Cylinder.from(result)!!
-                    if (hasToSaveOne) {
-                        showToast("Captured cylinder!\n(rms error: %.1f cm)", result.rmsError * 100f)
-                        glSurfaceView?.queueEvent { renderer.appendCylinder(cylinder, inliers) }
-                        addTransaction(Transaction.AddCylinder)
-                        this@MainActivity.lastFound = null
-                    } else {
-                        glSurfaceView?.queueEvent { renderer.updatePreview(cylinder) }
-                    }
-                }
-
-                else -> {
-                    if (hasToSaveOne) {
-                        showToast("Nothing captured, try again.\n(rms error: %.1f cm)", result.rmsError * 100f)
-                    } else {
-                        glSurfaceView?.queueEvent { renderer.setPreviewNone() }
-                    }
-                    this@MainActivity.lastFound = null
-                }
-            }
-            mutex.unlock()
         }
     }
 

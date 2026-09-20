@@ -12,6 +12,7 @@ class MotionTrackingStabilizer(
 ) {
     private var position: Vector3 = Vector3()
     private var distanceRemaining: Float = movingDistance
+    private var isInitialized: Boolean = false
 
     val progress: Float
         get() = ((movingDistance - distanceRemaining) / movingDistance).coerceIn(0f, 1f)
@@ -56,12 +57,20 @@ class MotionTrackingStabilizer(
 
         // In ARCore, camera looks toward -Z in camera space; a point "in front" is (0,0,-sensorDistance)
         val p = Vector3(cameraPose.transformPoint(floatArrayOf(0f, 0f, -sensorDistance)))
+        if (!isInitialized) {
+            position = p
+            isInitialized = true
+            return false
+        }
         val old = position
         position = p
 
         if (featureCount > 50) {
             val d = distance(p, old)
-            distanceRemaining = max(distanceRemaining - d, 0f)
+            // Limit delta to 0.2m per frame to avoid tracking jumps/glitches
+            if (d < 0.2f) {
+                distanceRemaining = max(distanceRemaining - d, 0f)
+            }
         }
         return distanceRemaining == 0f
     }

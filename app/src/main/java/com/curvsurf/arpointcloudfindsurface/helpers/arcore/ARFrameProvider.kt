@@ -80,10 +80,10 @@ class ARFrameProvider(activity: Activity) {
         if (session.isImageStabilizationModeSupported(imageStabilizationMode)) {
             config.imageStabilizationMode = imageStabilizationMode
         }
-        config.depthMode = if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
-            Config.DepthMode.AUTOMATIC
-        } else {
-            Config.DepthMode.DISABLED
+        config.depthMode = when {
+            session.isDepthModeSupported(Config.DepthMode.AUTOMATIC) -> Config.DepthMode.AUTOMATIC
+            session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY) -> Config.DepthMode.RAW_DEPTH_ONLY
+            else -> Config.DepthMode.DISABLED
         }
         session.configure(config)
     }

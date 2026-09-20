@@ -12,7 +12,8 @@ class CameraMotionDetector(
     minAngleRadian: Float = (3.0 * Math.PI / 180.0).toFloat()
 ) {
     private var position: Vector3 = Vector3()
-    private var direction: Vector3= Vector3()
+    private var direction: Vector3 = Vector3()
+    private var isInitialized: Boolean = false
 
     val minCosineAngle: Float = cos(minAngleRadian.toDouble()).toFloat()
 
@@ -20,10 +21,17 @@ class CameraMotionDetector(
         val position = Vector3(cameraPose.translation)
         val direction = Vector3(cameraPose.zAxis)
 
+        if (!isInitialized) {
+            this.position = position
+            this.direction = direction
+            isInitialized = true
+            return true
+        }
+
         val positionChanged = distance(position, this.position) > minDistance
         val directionChanged = dot(direction, this.direction) < minCosineAngle
 
-        if (positionChanged or directionChanged) {
+        if (positionChanged || directionChanged) {
             this.position = position
             this.direction = direction
             return true
